@@ -1,13 +1,14 @@
-# main.py
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from openai import OpenAI
 import os
-import openai
-from typing import Dict
+import json
+import textwrap
 
 app = FastAPI()
 
-# Enable CORS for demo (restrict later)
+# Allow CORS from your frontend (adjust origins if needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,78 +17,124 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment variables (set these in Render or your host)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_KEY:
+    raise RuntimeError("Set OPENAI_API_KEY environment variable before running the backend.")
 
-# Initialize OpenAI (do not hardcode keys)
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_KEY)
 
-def call_openai_system(user_prompt: str, model: str = "gpt-4o-mini") -> str:
-    """Call OpenAI chat completion and return text response."""
-    resp = openai.ChatCompletion.create(
-        model=model,
+class Payload(BaseModel):
+    mode: str
+    inputs: dict = {}
+
+def call_model(prompt: str, system: str = "You are Astra, a business-product building AI."):
+    # Use gpt-4o-mini or whichever model you have access to.
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "You are Astra — a concise assistant that returns useful output for product and strategy generation."},
-            {"role": "user", "content": user_prompt}
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
         ],
+        max_tokens=4000,
         temperature=0.2,
-        max_tokens=1200
     )
-    return resp.choices[0].message.content
+    return response.choices[0].message.content
 
-async def _generate_for_mode(niche: str, mode: str, extra: Dict = None):
-    extra = extra or {}
-    if mode == "problem_generation":
-        prompt = f"Generate 10 monetizable problems, solutions, and monetization strategies in the niche '{niche}'. Return a JSON-like textual result labeled clearly so frontend can display it."
-    elif mode == "product_build":
-        experience = extra.get("experience", "")
-        prompt = (
-            f"Create a product build plan for niche '{niche}' with user experience: '{experience}'."
-            " Provide step-by-step deliverables, resources needed, pricing tiers, and a 30/60/90 day launch checklist."
-            " Return a JSON-like textual result."
-        )
-    elif mode == "monetization_tips":
-        product_desc = extra.get("product", "")
-        prompt = (
-            f"For product/service: '{product_desc}' in niche '{niche}', create 8 actionable monetization strategies."
-            " Return a JSON-like textual result."
-        )
-    else:
-        prompt = f"Generate suggestions for mode '{mode}' in niche '{niche}'."
+@app.post("/api/generate")
+async def generate(payload: Payload):
+    mode = payload.mode
+    inputs = payload.inputs or {}
 
-    return call_openai_system(prompt)
+    # MODE 1: Problem generation from a niche
+    if mode == "mode1":
+        niche = inputs.get("niche", "general")
+        prompt = f"""
+        Generate a JSON object containing:
+        - problems: array of 10 monetizable problem statements for the niche '{niche}'.
+        - solutions: short actionable solutions for each problem.
+        - quick_tips: 5 short tips to start solving/monetizing these problems.
+        Return valid JSON only.
+        """
+        out = call_model(textwrap.dedent(prompt))
+        # try to parse JSON, but if not valid return raw
+        try:
+            parsed = json.loads(out)
+            return {"result": json.dumps(parsed, indent=2)}
+        except Exception:
+            return {"result": out}
 
-@app.get("/")
-def root():
-    return {"message": "Astra backend running"}
+    # MODE 2: Main locked mode -> pick niche and create 3-5 complete products
+    if mode == "mode2":
+        userType = inputs.get("userType", "")
+        strengths = inputs.get("strengths", "")
+        prompt = f"""
+        You are Astra: an AI that BUILDS complete, ready-to-sell digital products (not ideas). 
 
-@app.post("/generate-problem")
-async def generate_problem(payload: Dict):
-    niche = payload.get("niche", "general")
-    try:
-        result_text = await _generate_for_mode(niche, "problem_generation")
-        return {"ok": True, "result": result_text}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        Task:
+        1) Choose the single most profitable niche (based on global demand and user's context).
+        2) Create 3 to 5 COMPLETE digital products for that niche. 
 
-@app.post("/generate-product")
-async def generate_product(payload: Dict):
-    niche = payload.get("niche", "general")
-    experience = payload.get("experience", "")
-    try:
-        result_text = await _generate_for_mode(niche, "product_build", {"experience": experience})
-        return {"ok": True, "result": result_text}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        For EACH product produce the following sections explicitly and fully written out (no placeholders):
+        - product_title
+        - short_product_description (2-3 lines)
+        - full_product_content: a finished, publishable text/manual (equivalent to the content of a 10-20 page PDF or templates/workbook)
+        - modules_or_chapters: list with full text for each module (headings + paragraphs)
+        - templates_checklists: actual checklist/template text that a user can copy & paste
+        - target_audience: who to sell to, with demographics and psychographics
+        - main_pain_points: 3 core pain points
+        - value_proposition and sales_angles (full paragraphs)
+        - landing_page_copy (headline, subhead, bullets, CTA, 200-400 words body text)
+        - pricing_recommendation and packaging (single price + upsells)
+        - 7_day_launch_plan (day-by-day actionable plan)
+        - email_sequence (5 emails fully written)
+        - social_media_posts (5 captions / post texts)
+        - facebook/google_ads_copy (3 short ad variations)
+        - suggested_bonuses and upgrades
+        - quick_creation_checklist (step-by-step actions the user must do to finalize product)
 
-@app.post("/generate-strategy")
-async def generate_strategy(payload: Dict):
-    niche = payload.get("niche", "general")
-    product = payload.get("product", "")
-    try:
-        result_text = await _generate_for_mode(niche, "monetization_tips", {"product": product})
-        return {"ok": True, "result": result_text}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        User context:
+        - userType: {userType}
+        - strengths: {strengths}
+
+        Output:
+        - Return a single JSON object with:
+          {{"niche": "...", "products": [ {{product object}}, ... ]}}
+
+        IMPORTANT: outputs must be fully written, no placeholders like [TEXT], and each product must be usable by a human to publish and sell.
+        """
+        out = call_model(textwrap.dedent(prompt), system="You are Astra, a product-building AI that writes full content.")
+        try:
+            parsed = json.loads(out)
+            return {"result": json.dumps(parsed, indent=2)}
+        except Exception:
+            # If model returned text (not strict JSON), just return raw text
+            return {"result": out}
+
+    # MODE 3: Expert mode - user provides exact idea to be fully built
+    if mode == "mode3":
+        idea = inputs.get("idea", "")
+        prompt = f"""
+        You are Astra. The user gave this request: {idea}
+
+        Task: Build a full, ready-to-publish digital product from that exact idea.
+        Provide:
+        - product_title
+        - full_product_content (complete text, long form)
+        - modules and chapter text
+        - templates and checklists
+        - landing page copy
+        - email sequence (5 emails)
+        - ads copy and social captions
+        - pricing and launch plan
+
+        Return as JSON with keys: title, content, modules, templates, landing, emails, ads, price, launch_plan.
+        """
+        out = call_model(textwrap.dedent(prompt))
+        try:
+            parsed = json.loads(out)
+            return {"result": json.dumps(parsed, indent=2)}
+        except Exception:
+            return {"result": out}
+
+    return {"result": f"Unknown mode: {mode}"}
+
